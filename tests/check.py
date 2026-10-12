@@ -2,26 +2,38 @@
 """Run math, input-validation, text and SVG regressions with installed tools.
 
 Uses Python's standard library, Typst and pdftotext (Poppler). All compiler
-outputs are kept in memory. TYPST_BIN can select a compiler for version checks.
+outputs are kept in memory. An isolated local package lets registry examples
+compile before publication. TYPST_BIN selects a compiler for version checks.
 """
 import json
 import math
 import os
 from pathlib import Path
 import random
+import shutil
 import subprocess
+import tomllib
 import unittest
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 
 ROOT = Path(__file__).resolve().parents[1]
 TYPST = os.environ.get("TYPST_BIN", "typst")
+PACKAGE_PATH = ROOT / "tests" / "rendered" / "packages"
 PREAMBLE = '#import "/lib.typ": feasible-region\n#set page(width: auto, height: auto, margin: 1cm)\n'
+
+
+def prepare_local_package():
+    manifest = tomllib.loads((ROOT / "typst.toml").read_text())["package"]
+    destination = PACKAGE_PATH / "preview" / manifest["name"] / manifest["version"]
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ("typst.toml", "lib.typ", "geometry.typ", "README.md", "LICENSE"):
+        shutil.copyfile(ROOT / name, destination / name)
 
 
 def compile_source(source, fmt="pdf"):
     return subprocess.run(
-        [TYPST, "compile", "--root", str(ROOT), "--format", fmt, "-", "-"],
+        [TYPST, "compile", "--root", str(ROOT), "--package-path", str(PACKAGE_PATH), "--format", fmt, "-", "-"],
         input=source.encode(), capture_output=True, check=False,
     )
 
@@ -110,7 +122,7 @@ class Correctness(unittest.TestCase):
     def test_mathematical_assertions_and_render_battery(self):
         for source in ("analysis.typ", "regression.typ", "../gallery/examples.typ", "../gallery/g2-es.typ", "../gallery/additional.typ"):
             with self.subTest(source=source):
-                result = subprocess.run([TYPST, "compile", "--root", str(ROOT),
+                result = subprocess.run([TYPST, "compile", "--root", str(ROOT), "--package-path", str(PACKAGE_PATH),
                                          str(ROOT / "tests" / source), "-"], capture_output=True)
                 self.assertEqual(result.returncode, 0, result.stderr.decode())
 
@@ -260,4 +272,5 @@ class Correctness(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    prepare_local_package()
     unittest.main(verbosity=2)
