@@ -1,3 +1,4 @@
 # Typst / build artifacts
 *.pdf
 .typst-cache/
+tests/rendered/

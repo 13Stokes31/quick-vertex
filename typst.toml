@@ -1,6 +1,6 @@
 [package]
 name = "quick-vertex"
-version = "0.1.1"
+version = "0.2.0"
 entrypoint = "lib.typ"
 authors = ["Jesús Manuel González Meneses"]
 license = "MIT"
@@ -9,4 +9,4 @@ repository = "https://github.com/13Stokes31/quick-vertex"
 keywords = ["linear-programming", "optimization", "plot", "math", "education"]
 categories = ["visualization"]
 compiler = "0.14.0"
-exclude = ["tests", "gallery", "ROADMAP.md", "TESTING.md", ".gitignore"]
+exclude = ["tests", "gallery", "ROADMAP.md", "TESTING.md", "CHANGELOG.md", "CHATGPT.md", ".gitignore"]

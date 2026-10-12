@@ -10,10 +10,14 @@
 // =============================================================================
 
 #import "@preview/cetz:0.5.2"
+#import "geometry.typ" as geo
+#let analyze = geo.analyze
 
 #let _blue = rgb("#2e5fa3")
 
 #let _fmt-num(v) = {
+  // Preserve small nonzero values instead of reporting a scaled optimum as 0.
+  if v != 0 and calc.abs(v) < 0.005 { return str(v) }
   let r = calc.round(v, digits: 2)
   if calc.abs(r) < 1e-9 { r = 0 }
   if calc.round(r) == r { str(calc.round(r)) } else { str(r) }
@@ -29,15 +33,22 @@
     infeasible-note: " (the constraint system has no common solution).",
     unbounded: "Unbounded region (arrows indicate it continues indefinitely).",
     lines: "Lines:",
+    level-lines: "Level lines:",
     vertex: "Vertex",
     coordinates: "Coordinates",
     vertices: "Vertices:",
     multiple: "Multiple solution:",
-    seg-prefix: "on the entire segment",
-    ray-prefix: "on the entire ray starting at",
+    seg-prefix: "on the feasible part of the segment",
+    ray-prefix: "on the feasible part of the ray starting at",
     infinitely: "(infinitely many optima).",
     optimum: "Optimum",
     at: "at",
+    all: "Every feasible point is optimal.",
+    optimal-line: "on the optimal line",
+    no-vertices: "No finite vertices.",
+    excluded: "Hollow points / rows marked ○ are excluded boundary points.",
+    limit: sense => if sense == "max" { "Supremum" } else { "Infimum" },
+    unattained: "not attained (the optimal boundary is excluded).",
     no-finite: sense => [No finite #sense: $Z$ #if sense == "max" [increases] else [decreases] without bound over the unbounded region.],
   ),
   es: (
@@ -45,15 +56,22 @@
     infeasible-note: " (el sistema de restricciones no tiene solución común).",
     unbounded: "Región no acotada (las flechas indican que continúa indefinidamente).",
     lines: "Rectas:",
+    level-lines: "Rectas de nivel:",
     vertex: "Vértice",
     coordinates: "Coordenadas",
     vertices: "Vértices:",
     multiple: "Solución múltiple:",
-    seg-prefix: "en todo el segmento",
-    ray-prefix: "en toda la semirrecta que parte de",
+    seg-prefix: "en la parte factible del segmento",
+    ray-prefix: "en la parte factible de la semirrecta que parte de",
     infinitely: "(infinitos óptimos).",
     optimum: "Óptimo",
     at: "en",
+    all: "Todos los puntos factibles son óptimos.",
+    optimal-line: "en la recta óptima",
+    no-vertices: "Sin vértices finitos.",
+    excluded: "Los puntos huecos / filas marcadas con ○ están excluidos.",
+    limit: sense => if sense == "max" { "Supremo" } else { "Ínfimo" },
+    unattained: "no alcanzado (la frontera óptima está excluida).",
     no-finite: sense => [No existe #(if sense == "max" [máximo] else [mínimo]) finito: $Z$ #if sense == "max" [crece] else [decrece] sin cota sobre la región no acotada.],
   ),
 )
@@ -68,7 +86,7 @@
 /// - objective: (c1, c2) coefficients of Z = c1·x + c2·y   (or none)
 ///     an optional 3rd element sets the objective color: (c1, c2, color)
 /// - sense: "max" (default) or "min" (optimization sense)
-/// - gradient: draw the ∇Z vector at the optimum
+/// - gradient: show the optimization direction arrow, labeled "max Z" or "min Z"
 /// - table: show the vertex table; if false, a compact vertex legend
 /// - first-quadrant: add x ≥ 0, y ≥ 0 (ON by default)
 /// - labels: line equations, in the order of `constraints`
@@ -95,118 +113,30 @@
   margin: 1.15,
   equal-aspect: true,
 ) = {
-  let S = _i18n.at(lang, default: _i18n.en)
-  let R = constraints
-  if first-quadrant {
-    R = R + ((1, 0, 0, ">="), (0, 1, 0, ">="))
-  }
-
-  // normalized operator: "<" behaves like "<=" for the geometry
-  // (the boundary is drawn dashed to signal it is not included)
-  let _norm(s) = if s == "<" { "<=" } else if s == ">" { ">=" } else { s }
-  let _strict(s) = s == "<" or s == ">"
-
-  let satisfies(p) = {
-    let (x, y) = p
-    for (a, b, c, s, ..) in R {
-      let sn = _norm(s)
-      let v = a * x + b * y
-      if sn == "<=" and v > c + 1e-6 { return false }
-      if sn == ">=" and v < c - 1e-6 { return false }
-    }
-    true
-  }
-
-  let intersect(r1, r2) = {
-    let (a1, b1, c1, ..) = r1
-    let (a2, b2, c2, ..) = r2
-    let det = a1 * b2 - a2 * b1
-    if calc.abs(det) < 1e-9 { return none }
-    ((c1 * b2 - c2 * b1) / det, (a1 * c2 - a2 * c1) / det)
-  }
-
-  // ---- finite vertices (real corners), for labeling and optimizing ----
-  let verts = ()
-  for i in range(R.len()) {
-    for j in range(i + 1, R.len()) {
-      let p = intersect(R.at(i), R.at(j))
-      if p != none and satisfies(p) {
-        let is-dup = verts.any(q => calc.abs(q.at(0) - p.at(0)) < 1e-4 and calc.abs(q.at(1) - p.at(1)) < 1e-4)
-        if not is-dup { verts.push(p) }
-      }
-    }
-  }
-  if verts.len() >= 1 {
-    let cx = verts.map(p => p.at(0)).sum() / verts.len()
-    let cy = verts.map(p => p.at(1)).sum() / verts.len()
-    verts = verts.sorted(key: p => calc.atan2(p.at(0) - cx, p.at(1) - cy))
-  }
-
-  // ---- recession cone: is the region unbounded? ----
-  let recession = ()
-  let steps = 180
-  for k in range(steps) {
-    let th = k / steps * 360deg
-    let dx = calc.cos(th)
-    let dy = calc.sin(th)
-    let ok = true
-    for (a, b, c, s, ..) in R {
-      let sn = _norm(s)
-      let ad = a * dx + b * dy
-      if sn == "<=" and ad > 1e-9 { ok = false }
-      if sn == ">=" and ad < -1e-9 { ok = false }
-    }
-    if ok { recession.push((dx, dy)) }
-  }
-  let bounded = recession.len() == 0
-
-  // ---- objective: finite optimum (unique or multiple), or unbounded ----
-  let evals = ()
-  let opt-idx = none        // "primary" optimal vertex (for the gradient)
-  let opt-idxs = ()         // ALL optimal vertices (ties ⇒ multiple solution)
-  let obj-unbounded = false
-  let opt-multiple = false
-  let opt-ray = none        // recession direction with constant Z (infinite optimal edge)
-  if objective != none {
-    let (oc1, oc2, ..) = objective
-    for d in recession {
-      let g = oc1 * d.at(0) + oc2 * d.at(1)
-      if sense == "max" and g > 1e-7 { obj-unbounded = true }
-      if sense == "min" and g < -1e-7 { obj-unbounded = true }
-    }
-    if verts.len() > 0 {
-      evals = verts.map(p => oc1 * p.at(0) + oc2 * p.at(1))
-      if not obj-unbounded {
-        let best = evals.at(0)
-        for z in evals {
-          if (sense == "max" and z > best) or (sense == "min" and z < best) { best = z }
-        }
-        // relative tolerance: every vertex reaching the optimal value
-        let tol = 1e-6 * calc.max(1, calc.abs(best))
-        for (k, z) in evals.enumerate() {
-          if calc.abs(z - best) <= tol { opt-idxs.push(k) }
-        }
-        opt-idx = opt-idxs.at(0)
-        opt-multiple = opt-idxs.len() >= 2
-
-        // Unbounded region: is there a recession direction with constant Z?
-        // Then an optimal RAY leaves the optimal vertex.
-        if not bounded and opt-idxs.len() >= 1 {
-          for d in recession {
-            if calc.abs(oc1 * d.at(0) + oc2 * d.at(1)) < 1e-7 {
-              opt-ray = d
-              opt-multiple = true
-            }
-          }
-        }
-      }
-    }
-  }
+  let model = analyze(constraints, objective: objective, sense: sense, first-quadrant: first-quadrant)
+  assert(type(size) == array and size.len() == 2 and size.all(v => geo.numeric(v) and v > 0), message: "size must contain two positive finite numbers")
+  assert(geo.numeric(margin) and margin >= 1, message: "margin must be a finite number >= 1")
+  assert(type(gradient) == bool and type(table) == bool and type(equal-aspect) == bool, message: "gradient, table and equal-aspect must be booleans")
+  assert(type(region-color) == color, message: "region-color must be a color")
+  assert(("en", "es").contains(lang), message: "lang must be en or es")
+  assert(labels == none or (type(labels) == array and labels.len() == constraints.len()), message: "labels must contain one entry per constraint")
+  let S = _i18n.at(lang)
+  let R = model.constraints
+  let lines = constraints.map(geo.normalize)
+  let verts = model.vertices
+  let recession = model.recession
+  let bounded = model.bounded
+  let evals = model.evals
+  let opt-idxs = model.optimal-indices
+  let opt-idx = if opt-idxs.len() > 0 { opt-idxs.first() } else { none }
+  let _strict = geo.strict
 
   // ---- visible frame: REAL bounding box (allows negative coordinates) ----
   let mrg = if bounded { margin } else { calc.max(margin, 1.6) }
-  let xs = verts.map(p => p.at(0))
-  let ys = verts.map(p => p.at(1))
+  // Vertex-free regions need actual feasible anchors, not an origin-only frame.
+  let anchors = if verts.len() > 0 { verts } else if model.feasible { model.candidates + (model.witness,) } else { () }
+  let xs = anchors.map(p => p.at(0))
+  let ys = anchors.map(p => p.at(1))
   // if there are no vertices, a default frame
   let bx0 = if xs.len() > 0 { calc.min(..xs, 0) } else { 0 }
   let bx1 = if xs.len() > 0 { calc.max(..xs, 0) } else { 3 }
@@ -217,7 +147,7 @@
   // so it is visible where it escapes (the frame used to shrink otherwise).
   if not bounded {
     let span = calc.max(bx1 - bx0, by1 - by0, 3)
-    let anchors = if verts.len() > 0 { verts } else { ((0, 0),) }
+    let anchors = if anchors.len() > 0 { anchors } else { ((0, 0),) }
     for d in recession {
       for A in anchors {
         let px2 = A.at(0) + span * d.at(0)
@@ -267,14 +197,11 @@
   // ---- clip the frame against each half-plane (Sutherland–Hodgman) ----
   let clip-hp(poly, ine) = {
     let (a, b, c, s, ..) = ine
-    let sn = _norm(s)
-    let inside = p => {
-      let v = a * p.at(0) + b * p.at(1)
-      if sn == "<=" { v <= c + 1e-9 } else { v >= c - 1e-9 }
-    }
+    let inside = p => geo.satisfies(p, (ine,))
     let inter = (A, B) => {
       let den = a * (B.at(0) - A.at(0)) + b * (B.at(1) - A.at(1))
-      let t = if calc.abs(den) < 1e-12 { 0 } else { (c - a * A.at(0) - b * A.at(1)) / den }
+      let t = if den == 0 { 0 } else { (c - a * A.at(0) - b * A.at(1)) / den }
+      t = calc.min(1, calc.max(0, t))
       (A.at(0) + t * (B.at(0) - A.at(0)), A.at(1) + t * (B.at(1) - A.at(1)))
     }
     let out = ()
@@ -291,31 +218,29 @@
     out
   }
   let region = ((minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy))
-  for ine in R { region = clip-hp(region, ine) }
+  if model.feasible { for ine in R { region = clip-hp(region, ine) } } else { region = () }
   // drop consecutive duplicate points (appear when 3+ lines are concurrent)
   let cleaned = ()
   for p in region {
-    let dup = cleaned.len() > 0 and (
-      calc.abs(cleaned.last().at(0) - p.at(0)) < 1e-7 and calc.abs(cleaned.last().at(1) - p.at(1)) < 1e-7
-    )
+    let dup = cleaned.len() > 0 and geo.same-point(cleaned.last(), p)
     if not dup { cleaned.push(p) }
   }
   if cleaned.len() >= 2 {
     let pa = cleaned.first()
     let pz = cleaned.last()
-    if calc.abs(pa.at(0) - pz.at(0)) < 1e-7 and calc.abs(pa.at(1) - pz.at(1)) < 1e-7 {
+    if geo.same-point(pa, pz) {
       cleaned = cleaned.slice(0, cleaned.len() - 1)
     }
   }
   let region = cleaned
 
-  // does an edge (in data coords) lie on a real constraint line?
-  let edge-on-constraint = (A, B) => {
-    for (a, b, c, s, ..) in R {
-      if calc.abs(a * A.at(0) + b * A.at(1) - c) < 1e-5 and calc.abs(a * B.at(0) + b * B.at(1) - c) < 1e-5 { return true }
-    }
-    false
-  }
+  // A strict active constraint excludes this side. Its colored boundary is
+  // drawn later; leave it free of any underlying solid region border.
+  let edge-constraints = (A, B) => R.filter(r => {
+    ((r.at(0) != 0 or r.at(1) != 0) and
+      calc.abs(r.at(0) * A.at(0) + r.at(1) * A.at(1) - r.at(2)) <= geo.tolerance(r, A) and
+      calc.abs(r.at(0) * B.at(0) + r.at(1) * B.at(1) - r.at(2)) <= geo.tolerance(r, B))
+  })
 
   // default palette for the boundary lines (kept distinct and print-friendly)
   let colors = (
@@ -409,8 +334,9 @@
         let Bd = region.at(calc.rem(i + 1, nsides))
         let A = (sx(Ad.at(0)), sy(Ad.at(1)))
         let B = (sx(Bd.at(0)), sy(Bd.at(1)))
-        if edge-on-constraint(Ad, Bd) {
-          line(A, B, stroke: 0.9pt + region-edge)
+        let active = edge-constraints(Ad, Bd)
+        if active.len() > 0 {
+          if not active.any(r => _strict(r.at(3))) { line(A, B, stroke: 0.9pt + region-edge) }
         } else {
           // open side (on the frame): arrows pointing outward
           let mx = (A.at(0) + B.at(0)) / 2
@@ -442,16 +368,13 @@
     }
 
     // ---- boundary lines ----
-    for (k, con) in constraints.enumerate() {
+    for (k, con) in lines.enumerate() {
       let (a, b, c, s, ..) = con
-      let cand = ()
-      if calc.abs(b) > 1e-9 { cand.push((minx, (c - a * minx) / b)); cand.push((maxx, (c - a * maxx) / b)) }
-      if calc.abs(a) > 1e-9 { cand.push(((c - b * miny) / a, miny)); cand.push(((c - b * maxy) / a, maxy)) }
-      let pts = cand.filter(p => p.at(0) >= minx - 1e-6 and p.at(0) <= maxx + 1e-6 and p.at(1) >= miny - 1e-6 and p.at(1) <= maxy + 1e-6)
+      let pts = geo.line-in-frame(a, b, c, minx, miny, maxx, maxy)
       let col = line-color-for(k, con)
       if pts.len() >= 2 {
         // dashed boundary if the inequality is strict (does not include the line)
-        let stroke-style = if _strict(s) {
+        let stroke-style = if edge-constraints(pts.first(), pts.last()).any(r => _strict(r.at(3))) {
           (paint: col, thickness: 1.1pt, dash: "dashed")
         } else {
           (paint: col, thickness: 1.1pt)
@@ -462,88 +385,66 @@
       }
     }
 
-    // ---- objective level lines ----
-    if objective != none and verts.len() > 0 {
-      let (oc1, oc2, ..) = objective
+    // ---- objective level lines and the actual optimal face ----
+    if objective != none and model.feasible and model.status != "all" {
+      let g = geo.unit(objective)
+      let (oc1, oc2) = g
       let level-line(kval, style) = {
-        let cand = ()
-        if calc.abs(oc2) > 1e-9 { cand.push((minx, (kval - oc1 * minx) / oc2)); cand.push((maxx, (kval - oc1 * maxx) / oc2)) }
-        if calc.abs(oc1) > 1e-9 { cand.push(((kval - oc2 * miny) / oc1, miny)); cand.push(((kval - oc2 * maxy) / oc1, maxy)) }
-        let pts = cand.filter(p => p.at(0) >= minx - 1e-6 and p.at(0) <= maxx + 1e-6 and p.at(1) >= miny - 1e-6 and p.at(1) <= maxy + 1e-6)
-        if pts.len() >= 2 { line((sx(pts.at(0).at(0)), sy(pts.at(0).at(1))), (sx(pts.at(1).at(0)), sy(pts.at(1).at(1))), ..style) }
+        let pts = geo.line-in-frame(oc1, oc2, kval, minx, miny, maxx, maxy)
+        if pts.len() >= 2 { line((sx(pts.first().at(0)), sy(pts.first().at(1))), (sx(pts.last().at(0)), sy(pts.last().at(1))), ..style) }
       }
-      let zs = verts.map(p => oc1 * p.at(0) + oc2 * p.at(1))
-      let zlo = zs.reduce((a, b) => calc.min(a, b))
-      let zhi = zs.reduce((a, b) => calc.max(a, b))
-      if opt-idx != none {
+      let samples = if region.len() > 0 { region } else { anchors }
+      let zs = samples.map(p => geo.dot(g, p))
+      let zlo = calc.min(..zs)
+      let zhi = calc.max(..zs)
+      if model.optimum != none {
+        let zopt = geo.dot(g, model.optimum)
         for frac in (0.34, 0.67) { level-line(zlo + frac * (zhi - zlo), (stroke: (paint: obj-color.transparentize(60%), thickness: 0.7pt, dash: "dashed"))) }
-        level-line(evals.at(opt-idx), (stroke: 1.2pt + obj-color))
+        let unattained = model.status == "unattained"
+        level-line(zopt, (stroke: (paint: obj-color, thickness: 1.2pt, dash: if unattained { "dashed" } else { "solid" })))
 
-        // ---- optimal edge (multiple solution) highlighted ----
-        if opt-multiple {
-          if opt-idxs.len() >= 2 {
-            // segment between the two tied optimal vertices
-            let P = verts.at(opt-idxs.at(0))
-            let Q = verts.at(opt-idxs.at(opt-idxs.len() - 1))
-            line(
-              (sx(P.at(0)), sy(P.at(1))),
-              (sx(Q.at(0)), sy(Q.at(1))),
-              stroke: (paint: obj-color, thickness: 3.4pt, cap: "round"),
-            )
-          }
-          if opt-ray != none {
-            // optimal ray: from the optimal vertex along the recession direction
-            let P = verts.at(opt-idxs.at(opt-idxs.len() - 1))
-            let dx = opt-ray.at(0)
-            let dy = opt-ray.at(1)
-            // advance until leaving the frame
-            let t = 1e9
-            if dx > 1e-9 { t = calc.min(t, (maxx - P.at(0)) / dx) }
-            if dx < -1e-9 { t = calc.min(t, (minx - P.at(0)) / dx) }
-            if dy > 1e-9 { t = calc.min(t, (maxy - P.at(1)) / dy) }
-            if dy < -1e-9 { t = calc.min(t, (miny - P.at(1)) / dy) }
-            if t < 1e8 {
-              let Q = (P.at(0) + t * dx, P.at(1) + t * dy)
-              line(
-                (sx(P.at(0)), sy(P.at(1))),
-                (sx(Q.at(0)), sy(Q.at(1))),
-                mark: (end: "stealth", fill: obj-color),
-                stroke: (paint: obj-color, thickness: 3.4pt, cap: "round"),
-              )
-            }
+        // Clipping the optimal line handles segments, rays and full lines,
+        // including faces with excluded endpoints and regions without vertices.
+        if ("segment", "ray", "line", "unattained").contains(model.status) {
+          let face = clip-hp(clip-hp(region, (oc1, oc2, zopt, "<=")), (oc1, oc2, zopt, ">="))
+          face = geo.unique(face).sorted(key: p => -oc2 * p.at(0) + oc1 * p.at(1))
+          if face.len() >= 2 {
+            let P = face.first()
+            let Q = face.last()
+            let arrow-at = d => if model.optimal-directions.any(e => geo.dot(d, e) > 1 - geo.epsilon) { "stealth" } else { none }
+            line((sx(P.at(0)), sy(P.at(1))), (sx(Q.at(0)), sy(Q.at(1))),
+              mark: if unattained { none } else { (start: arrow-at(geo.unit(geo.sub(P, Q))), end: arrow-at(geo.unit(geo.sub(Q, P)))) },
+              stroke: (paint: obj-color, thickness: 3.4pt, dash: if unattained { "dashed" } else { "solid" }))
           }
         }
-
         if gradient {
-          let vopt = verts.at(opt-idx)
-          // gradient direction on screen: (ky·oc1, kx·oc2) — the "crossed" scale
-          // factors are exactly what keeps the arrow perpendicular to the level
-          // lines on screen even when kx ≠ ky (equal-aspect: false). Flipped for
-          // "min" so it points towards the optimum (∇Z itself always points
-          // towards increasing Z, but a "min" optimum lies in the decreasing
-          // direction).
-          let gsign = if sense == "min" { -1 } else { 1 }
-          let gx = gsign * ky * oc1
-          let gy = gsign * kx * oc2
+          // Crossed scale factors retain perpendicularity on screen. Show the
+          // optimization direction, labeled with the requested sense.
+          let sign = if sense == "min" { -1 } else { 1 }
+          let gx = sign * ky * oc1
+          let gy = sign * kx * oc2
           let norm = calc.sqrt(gx * gx + gy * gy)
-          if norm > 1e-9 {
-            let L = 0.9
-            let ox = sx(vopt.at(0))
-            let oy = sy(vopt.at(1))
-            line((ox, oy), (ox + gx / norm * L, oy + gy / norm * L), mark: (end: "stealth", fill: obj-color), stroke: 1.1pt + obj-color)
-            content((ox + gx / norm * (L + 0.35), oy + gy / norm * (L + 0.35)), text(8pt, fill: obj-color, weight: "bold")[$nabla Z$])
-          }
+          let L = 0.9
+          let origin = if opt-idx == none { model.optimum } else { verts.at(opt-idx) }
+          let ox = sx(origin.at(0))
+          let oy = sy(origin.at(1))
+          line((ox, oy), (ox + gx / norm * L, oy + gy / norm * L), mark: (end: "stealth"), stroke: 1.1pt + obj-color)
+          let arrow-label = if sense == "min" { $min Z$ } else { $max Z$ }
+          content((ox + gx / norm * (L + 0.35), oy + gy / norm * (L + 0.35)), text(8pt, fill: obj-color, weight: "bold", arrow-label))
         }
-      } else if obj-unbounded {
-        // unbounded objective: show the family sliding towards infinity
-        let span = zhi - zlo
-        for frac in (0.0, 0.5, 1.0, 1.6) { level-line(zlo + frac * calc.max(span, 1), (stroke: (paint: obj-color.transparentize(45%), thickness: 0.8pt, dash: "dashed"))) }
+      } else if model.status == "unbounded" {
+        for frac in (0.0, 0.5, 1.0) { level-line(zlo + frac * calc.max(zhi - zlo, 1), (stroke: (paint: obj-color.transparentize(45%), thickness: 0.8pt, dash: "dashed"))) }
       }
+    } else if model.status == "all" and region.len() >= 3 {
+      let polygon = region.map(p => (sx(p.at(0)), sy(p.at(1))))
+      line(..polygon, close: true, fill: obj-color.transparentize(85%), stroke: none)
+    } else if model.status == "all" and region.len() == 2 {
+      line((sx(region.first().at(0)), sy(region.first().at(1))), (sx(region.last().at(0)), sy(region.last().at(1))), stroke: 3.4pt + obj-color)
     }
 
     // ---- finite vertices: only those inside the frame ----
     let n-verts = verts.len()
-    for (k, p) in verts.enumerate() {
+    for (k, p) in (if model.feasible { verts } else { () }).enumerate() {
       if p.at(0) >= minx - 1e-6 and p.at(0) <= maxx + 1e-6 and p.at(1) >= miny - 1e-6 and p.at(1) <= maxy + 1e-6 {
         let is-opt = opt-idxs.contains(k)
         // label offset: the exterior bisector at this vertex, so the letter
@@ -573,7 +474,8 @@
           circle((sx(p.at(0)), sy(p.at(1))), radius: 0.11, fill: obj-color, stroke: 0.8pt + white)
           content((sx(p.at(0)) + lx, sy(p.at(1)) + ly), text(10.5pt, weight: "bold", fill: obj-color)[#letters.at(calc.rem(k, letters.len()))])
         } else {
-          circle((sx(p.at(0)), sy(p.at(1))), radius: 0.1, fill: red, stroke: none)
+          let included = geo.satisfies(p, R, open: true)
+          circle((sx(p.at(0)), sy(p.at(1))), radius: 0.1, fill: if included { red } else { white }, stroke: if included { none } else { 0.9pt + red })
           content((sx(p.at(0)) + lx, sy(p.at(1)) + ly), text(10pt, weight: "bold")[#letters.at(calc.rem(k, letters.len()))])
         }
       }
@@ -591,9 +493,14 @@
   align(center, plot)
   v(0.3em)
 
-  if verts.len() == 0 and region.len() < 3 {
+  if not model.feasible {
     align(center, text(size: 9pt, fill: rgb("#922B21"))[*#S.infeasible*#S.infeasible-note])
     return
+  }
+
+  if objective != none and model.status != "all" {
+    align(center, text(size: 9pt, fill: obj-color)[*#S.level-lines* $Z = k$])
+    v(0.2em)
   }
 
   if not bounded {
@@ -608,7 +515,7 @@
   if objective != none and table and verts.len() > 0 {
     let (oc1, oc2, ..) = objective
     let rows = verts.enumerate().map(((k, p)) => {
-      let et = letters.at(calc.rem(k, letters.len()))
+      let et = letters.at(calc.rem(k, letters.len())) + if geo.satisfies(p, R, open: true) { "" } else { " ○" }
       let coord = $(#_fmt-num(p.at(0)), #_fmt-num(p.at(1)))$
       let zv = $#_fmt-num(evals.at(k))$
       if opt-idxs.contains(k) {
@@ -624,32 +531,43 @@
       _table.header([*#S.vertex*], [*#S.coordinates*], $bold(Z = #oc1 x + #oc2 y)$),
       ..rows,
     )))
-    if opt-idx != none and opt-multiple {
-      let zopt = _fmt-num(evals.at(opt-idx))
-      if opt-idxs.len() >= 2 and opt-ray == none {
-        let P = verts.at(opt-idxs.at(0))
-        let Q = verts.at(opt-idxs.at(opt-idxs.len() - 1))
-        let eP = letters.at(calc.rem(opt-idxs.at(0), letters.len()))
-        let eQ = letters.at(calc.rem(opt-idxs.at(opt-idxs.len() - 1), letters.len()))
-        align(center, text(size: 9pt)[
-          *#S.multiple* $Z = zopt$ #S.seg-prefix #eP$(#_fmt-num(P.at(0)), #_fmt-num(P.at(1)))$–#eQ$(#_fmt-num(Q.at(0)), #_fmt-num(Q.at(1)))$ #S.infinitely
-        ])
-      } else {
-        let P = verts.at(opt-idxs.at(opt-idxs.len() - 1))
-        let eP = letters.at(calc.rem(opt-idxs.at(opt-idxs.len() - 1), letters.len()))
-        align(center, text(size: 9pt)[
-          *#S.multiple* $Z = zopt$ #S.ray-prefix #eP$(#_fmt-num(P.at(0)), #_fmt-num(P.at(1)))$ #S.infinitely
-        ])
-      }
-    } else if opt-idx != none {
-      let vopt = verts.at(opt-idx)
-      let et-opt = letters.at(calc.rem(opt-idx, letters.len()))
-      align(center, text(size: 9pt)[#S.optimum (#sense): $Z = #_fmt-num(evals.at(opt-idx))$ #S.at #et-opt$(#_fmt-num(vopt.at(0)), #_fmt-num(vopt.at(1)))$])
-    } else if obj-unbounded {
-      align(center, block(width: 100%, text(size: 9pt, fill: rgb("#922B21"))[#(S.no-finite)(sense)]))
-    }
-  } else {
+  } else if verts.len() > 0 {
     let vertex-legend = verts.enumerate().map(((k, p)) => [#letters.at(calc.rem(k, letters.len()))$(#_fmt-num(p.at(0)), #_fmt-num(p.at(1)))$])
     align(center, text(size: 9pt)[*#S.vertices* #vertex-legend.join(", ")])
+  } else {
+    align(center, text(size: 9pt)[#S.no-vertices])
+  }
+  if verts.any(p => not geo.satisfies(p, R, open: true)) {
+    align(center, text(size: 8pt, style: "italic")[#S.excluded])
+  }
+
+  // Objective diagnostics are independent of whether the table is displayed.
+  if objective != none {
+    let zopt = if model.value == none { none } else { _fmt-num(model.value) }
+    if model.status == "unbounded" {
+      // A percentage width collapses on auto-sized pages. Use the requested
+      // plot width so this diagnostic wraps into readable lines instead.
+      align(center, block(width: (size-w + 1.5) * 1cm, text(size: 9pt, fill: rgb("#922B21"))[#(S.no-finite)(sense)]))
+    } else if model.status == "unattained" {
+      align(center, text(size: 9pt)[#(S.limit)(sense): $Z = zopt$, #S.unattained])
+    } else if model.status == "all" {
+      align(center, text(size: 9pt)[#S.all $Z = zopt$.])
+    } else if model.status == "segment" {
+      let points = model.closure-indices.map(i => verts.at(i))
+      let g = geo.unit(objective)
+      points = points.sorted(key: p => -g.at(1) * p.at(0) + g.at(0) * p.at(1))
+      let P = points.first()
+      let Q = points.last()
+      align(center, text(size: 9pt)[*#S.multiple* $Z = zopt$ #S.seg-prefix $(#_fmt-num(P.at(0)), #_fmt-num(P.at(1)))$–$(#_fmt-num(Q.at(0)), #_fmt-num(Q.at(1)))$ #S.infinitely])
+    } else if model.status == "ray" {
+      let P = if model.closure-indices.len() > 0 { verts.at(model.closure-indices.first()) } else { model.optimum }
+      align(center, text(size: 9pt)[*#S.multiple* $Z = zopt$ #S.ray-prefix $(#_fmt-num(P.at(0)), #_fmt-num(P.at(1)))$ #S.infinitely])
+    } else if model.status == "line" {
+      align(center, text(size: 9pt)[*#S.multiple* $Z = zopt$ #S.optimal-line #S.infinitely])
+    } else if model.status == "unique" {
+      let P = model.optimum
+      let label = if opt-idx == none { [] } else { [#letters.at(calc.rem(opt-idx, letters.len()))] }
+      align(center, text(size: 9pt)[#S.optimum (#sense): $Z = zopt$ #S.at #label$(#_fmt-num(P.at(0)), #_fmt-num(P.at(1)))$])
+    }
   }
 }
